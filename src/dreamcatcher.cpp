@@ -6,30 +6,43 @@ void __cdecl STUB(void)
 {
 }
 
-void** DF_INTERNAL_ChangeDisplayMode_Addr = 
+struct POS {
+	int x;
+	int y;
+	int width;
+	int height;
+};
+
+int DUST_CLIENT_WIDTH = 512;
+int DUST_CLIENT_HEIGHT = 384;
+float DUST_CLIENT_SCALING = 1.0f;
+POINT DUST_CLIENT_OFFSET = { 0,0 };
+POINT DUST_SCREEN_OFFSET = { 0,0 };
+
+void** DF_INTERNAL_ChangeDisplayMode_Addr =
 #if TITANIC
-	(void**)NULL;
+(void**)NULL;
 #elif LUNICUS
-	(void**)NULL;
+(void**)NULL;
 #else
-	(void**)0x004468A8;
+(void**)0x004468A8;
 #endif
 
-void** DF_INTERNAL_EnumDisplaySettings_Addr = 
+void** DF_INTERNAL_EnumDisplaySettings_Addr =
 #if TITANIC
-	(void**)NULL;
+(void**)NULL;
 #elif LUNICUS
 #else
-	(void**)0x00444F54;
+(void**)0x00444F54;
 #endif
 
-void** DF_INTERNAL_ExitWindowsEx_Addr = 
+void** DF_INTERNAL_ExitWindowsEx_Addr =
 #if TITANIC
-	(void**)NULL;
+(void**)NULL;
 #elif LUNICUS
-	(void**)NULL;
+(void**)NULL;
 #else
-	(void**)0x00445370;
+(void**)0x00445370;
 #endif
 
 GlobalState Global = {
@@ -43,7 +56,7 @@ MethodInfo* AppendMethodInfo(GlobalState& global, const MethodInfo& info)
 {
 	MethodInfo* result = new MethodInfo();
 	memcpy(result, &info, sizeof(MethodInfo));
-	
+
 	result->next = global.pMethodInfoList;
 	global.pMethodInfoList = result;
 
@@ -70,7 +83,7 @@ int WINAPI DivertedDFWinMain(
 }
 
 BEGIN_CALL_PATCHES(DivertedDFWinMain)
-	PATCH_CALL_IN_DUST(0x0043C279)
+PATCH_CALL_IN_DUST(0x0043C279)
 END_CALL_PATCHES
 
 DECLARE_DF_FUNCTION_IN_DUST(
@@ -88,11 +101,196 @@ void __cdecl DF_Set_Display(int, int, int)
 }
 
 BEGIN_CALL_PATCHES(DF_Set_Display)
-	PATCH_CALL_IN_DUST(0x0042BCF2)
+PATCH_CALL_IN_DUST(0x0042BCF2)
 END_CALL_PATCHES
 
 DECLARE_DF_FUNCTION_IN_DUST(
 	0x00429CB0, DF_Set_Display);
+
+/* Change BitBlt */
+typedef BOOL(WINAPI* BitBlt_t)(HDC, int, int, int, int, HDC, int, int, DWORD);
+BitBlt_t originalBitBlt = NULL;
+
+typedef BOOL(WINAPI* StretchBlt_t)(HDC, int, int, int, int, HDC, int, int, int, int, DWORD);
+StretchBlt_t customStretchBlt = NULL;
+
+void InitializeOriginalBitBlt() {
+	originalBitBlt = (BitBlt_t)GetProcAddress(GetModuleHandle("GDI32.dll"), "BitBlt");
+	if (originalBitBlt == NULL) {
+		printf("Failed to get original BitBlt address\n");
+	}
+	else {
+		printf("Original BitBlt address: %p\n", originalBitBlt);
+	}
+}
+void InitializecustomStretchBlt() {
+	customStretchBlt = (StretchBlt_t)GetProcAddress(GetModuleHandle("GDI32.dll"), "StretchBlt");
+	if (customStretchBlt == NULL) {
+		printf("Failed to get original BitBlt address\n");
+	}
+	else {
+		printf("Original BitBlt address: %p\n", customStretchBlt);
+	}
+}
+
+RECT GetScreenDimensions() {
+	RECT desktop;
+	const HWND hDesktop = GetDesktopWindow();
+	GetWindowRect(hDesktop, &desktop);
+	return desktop;
+}
+
+void CalculateScreenBounds() {
+	RECT window = GetScreenDimensions();
+
+	// Set client bounds (original image size and offset)
+	DUST_CLIENT_OFFSET.x = (window.right / 2) - (DUST_CLIENT_WIDTH / 2);
+	DUST_CLIENT_OFFSET.y = (window.bottom / 2) - (DUST_CLIENT_HEIGHT / 2);
+
+	// Determine the appropriate scaling
+	float hscale = (float)window.right / DUST_CLIENT_WIDTH;
+	float vscale = (float)window.bottom / DUST_CLIENT_HEIGHT;
+	DUST_CLIENT_SCALING = min(hscale, vscale);
+
+	// Set screen bounds (scaled image size and offset)
+	DUST_SCREEN_OFFSET.x = ((window.right / 2) - (DUST_CLIENT_WIDTH * DUST_CLIENT_SCALING / 2));
+	DUST_SCREEN_OFFSET.y = ((window.bottom / 2) - (DUST_CLIENT_HEIGHT * DUST_CLIENT_SCALING / 2));
+}
+
+// Function to calculate the scaling factor and offset
+POS CalculateScalingAndOffset(RECT window, int x, int y, int cx, int cy) {
+	POS tempPos = { 0,0,0,0 };
+
+	// Adjust positioning from centered to top-left corner
+	x = x - ((window.right / 2) - (DUST_CLIENT_WIDTH / 2));
+	y = y - ((window.bottom / 2) - (DUST_CLIENT_HEIGHT / 2));
+
+	// Calculate new offset based on scaling factor
+	int offsetX = ((window.right - (DUST_CLIENT_WIDTH * DUST_CLIENT_SCALING)) / 2);
+	int offsetY = ((window.bottom - (DUST_CLIENT_HEIGHT * DUST_CLIENT_SCALING)) / 2);
+
+	// Create new StretchBlt POSitioning values
+	tempPos.x = (int)(x * DUST_CLIENT_SCALING) + DUST_SCREEN_OFFSET.x;
+	tempPos.y = (int)(y * DUST_CLIENT_SCALING) + DUST_SCREEN_OFFSET.y;
+	tempPos.width = cx * DUST_CLIENT_SCALING;
+	tempPos.height = cy * DUST_CLIENT_SCALING;
+
+	return tempPos;
+}
+
+BOOL WINAPI DF_BitBltPlaceholder(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop) {
+	RECT desktop = GetScreenDimensions();
+	POS tempPos = CalculateScalingAndOffset(desktop, x, y, cx, cy);
+
+	/*printf("Screen Bounds: x=%d, y=%d, w=%d, h=%d\n",
+		DUST_SCREEN_OFFSET.x,
+		DUST_SCREEN_OFFSET.y,
+		DUST_SCREEN_OFFSET.width,
+		DUST_SCREEN_OFFSET.height);
+
+	printf("CustomBitBlt called: hdc=%p, x=%d, y=%d, cx=%d, cy=%d, hdcSrc=%p, x1=%d, y1=%d, rop=%lu\n",
+		hdc, tempPos.x, tempPos.y, tempPos.width, tempPos.height, hdcSrc, x1, y1, rop);*/
+
+	BOOL result = customStretchBlt(
+		hdc,
+		tempPos.x,
+		tempPos.y,
+		tempPos.width,
+		tempPos.height,
+		hdcSrc, x1, y1, cx, cy, rop);
+
+	return result;
+}
+
+void PatchBitBlt() {
+	DWORD oldProtect;
+	// Change memory protection to allow writing
+	if (VirtualProtect((LPVOID)0x0046233c, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+		// Patch the IAT entry
+		*(BitBlt_t*)0x0046233c = DF_BitBltPlaceholder;
+
+		// Restore the old protection
+		if (!VirtualProtect((LPVOID)0x0046233c, sizeof(LPVOID), oldProtect, &oldProtect)) {
+			printf("Failed to restore memory protection at 0x0046233c\n");
+		}
+		else {
+			printf("Patched IAT entry at 0x0046233c to point to CustomBitBlt\n");
+		}
+	}
+	else {
+		printf("Failed to change memory protection at 0x0046233c\n");
+	}
+}
+
+BEGIN_CALL_PATCHES(DF_BitBltPlaceholder)
+PATCH_CALL_IN_DUST(0x0042872d)
+PATCH_CALL_IN_DUST(0x0042877f)
+PATCH_CALL_IN_DUST(0x0042881b)
+PATCH_CALL_IN_DUST(0x0042899a)
+PATCH_CALL_IN_DUST(0x004289d2)
+PATCH_CALL_IN_DUST(0x00428a6b)
+PATCH_CALL_IN_DUST(0x00428aa3)
+PATCH_CALL_IN_DUST(0x00428baa)
+PATCH_CALL_IN_DUST(0x004290ce)
+PATCH_CALL_IN_DUST(0x00429172)
+PATCH_CALL_IN_DUST(0x0042e132)
+END_CALL_PATCHES
+
+/* Change ScreenToClient */
+
+typedef BOOL(WINAPI* ScreenToClient_t)(HWND, LPPOINT);
+ScreenToClient_t originalScreenToClient = NULL;
+
+void InitializeScreenToClient() {
+	originalScreenToClient = (ScreenToClient_t)GetProcAddress(GetModuleHandle("USER32.dll"), "ScreenToClient");
+	if (originalScreenToClient == NULL) {
+		printf("Failed to get original ScreenToClient address\n");
+	}
+	else {
+		printf("Original ScreenToClient address: %p\n", originalScreenToClient);
+	}
+}
+
+BOOL WINAPI DF_ScreenToClientPlaceholder(HWND hWind, LPPOINT lpPoint) {
+	BOOL result = originalScreenToClient(hWind, lpPoint);
+
+	POS tempPos = { 0,0,0,0 };
+
+	tempPos.x = ((lpPoint->x - DUST_SCREEN_OFFSET.x) / DUST_CLIENT_SCALING) + DUST_CLIENT_OFFSET.x;
+	tempPos.y = (lpPoint->y - DUST_SCREEN_OFFSET.y) / DUST_CLIENT_SCALING + DUST_CLIENT_OFFSET.y;
+
+	//printf("(%d,%d) -> (%d,%d)\n", lpPoint->x, lpPoint->y,tempPos.x,tempPos.y);
+
+	lpPoint->x = tempPos.x;
+	lpPoint->y = tempPos.y;
+
+	return result;
+}
+
+void PatchScreenToClient() {
+	DWORD oldProtect;
+	// Change memory protection to allow writing
+	if (VirtualProtect((LPVOID)0x00462490, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+		// Patch the IAT entry
+		*(ScreenToClient_t*)0x00462490 = DF_ScreenToClientPlaceholder;
+
+		// Restore the old protection
+		if (!VirtualProtect((LPVOID)0x00462490, sizeof(LPVOID), oldProtect, &oldProtect)) {
+			printf("Failed to restore memory protection at 0x00462490\n");
+		}
+		else {
+			printf("Patched IAT entry at 0x00462490 to point to ScreenToClient\n");
+		}
+	}
+	else {
+		printf("Failed to change memory protection at 0x00462490\n");
+	}
+}
+
+BEGIN_CALL_PATCHES(DF_ScreenToClientPlaceholder)
+PATCH_CALL_IN_DUST(0x0042d5d3)
+PATCH_CALL_IN_DUST(0x0042e2b7)
+END_CALL_PATCHES
 
 // Override this function to prevent the game
 // from asking about changing the display resolution.
@@ -103,9 +301,9 @@ int __cdecl DF_Prompt_Display_Change(int unused)
 }
 
 BEGIN_CALL_PATCHES(DF_Prompt_Display_Change)
-	PATCH_CALL_IN_DUST(0x0042B019)
-	PATCH_CALL_IN_DUST(0x0042B11C)
-	PATCH_CALL_IN_DUST(0x0042B1CF)
+PATCH_CALL_IN_DUST(0x0042B019)
+PATCH_CALL_IN_DUST(0x0042B11C)
+PATCH_CALL_IN_DUST(0x0042B1CF)
 END_CALL_PATCHES
 
 DECLARE_DF_FUNCTION_IN_DUST(
@@ -121,8 +319,8 @@ void __cdecl DF_Set_Pause(int pause)
 }
 
 BEGIN_CALL_PATCHES(DF_Set_Pause)
-	PATCH_CALL_IN_DUST(0x0042A6AE)
-	PATCH_CALL_IN_DUST(0x0042A7A7)
+PATCH_CALL_IN_DUST(0x0042A6AE)
+PATCH_CALL_IN_DUST(0x0042A7A7)
 END_CALL_PATCHES
 
 DECLARE_DF_FUNCTION_IN_DUST(
@@ -220,7 +418,7 @@ void Unpatch(GlobalState& global)
 			pInfo->callAddresses,
 			pInfo->oldAddress,
 			&count);
-		
+
 		MethodInfo* pOldInfo = pInfo;
 		pInfo = pInfo->next;
 		delete pOldInfo;
@@ -292,10 +490,20 @@ BOOL WINAPI DllMain(
 			AllocConsole();
 			freopen_s(&Global.console, "CONOUT$", "w", stdout);
 
+			CalculateScreenBounds();
+
+			InitializecustomStretchBlt();
+			PatchBitBlt();
+
+			InitializeScreenToClient();
+			PatchScreenToClient();
+
 			PatchSysColorCalls();
 			PatchDivideCrash();
 
 			Patch(Global);
+
+
 
 			printf("Ready!\n");
 		}
