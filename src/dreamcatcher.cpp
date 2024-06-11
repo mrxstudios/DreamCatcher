@@ -63,6 +63,38 @@ MethodInfo* AppendMethodInfo(GlobalState& global, const MethodInfo& info)
 	return result;
 }
 
+template<typename T>
+void InitializeFunction(T& originalFunc, const char* moduleName, const char* funcName) {
+	originalFunc = (T)GetProcAddress(GetModuleHandle(moduleName), funcName);
+	if (originalFunc == NULL) {
+		printf("Failed to get original %s address\n", funcName);
+	}
+	else {
+		printf("Original %s address: %p\n", funcName, originalFunc);
+	}
+}
+
+template<typename T, typename NewFunc>
+void PatchFunction(const char* moduleName, const char* originalFuncName, T& originalFunc, NewFunc newFunc, const void* address) {
+	// Initialize the original function
+	InitializeFunction(originalFunc, moduleName, originalFuncName);
+
+	// Patch the function
+	DWORD oldProtect;
+	if (VirtualProtect((LPVOID)address, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+		*(NewFunc*)address = newFunc;
+		if (!VirtualProtect((LPVOID)address, sizeof(LPVOID), oldProtect, &oldProtect)) {
+			printf("Failed to restore memory protection at %p\n", address);
+		}
+		else {
+			printf("Patched IAT entry at %p to point to %s\n", address, originalFuncName);
+		}
+	}
+	else {
+		printf("Failed to change memory protection at %p\n", address);
+	}
+}
+
 // Override the entry method in case we need to do
 // anything fancier that is not appropriate for DllMain.
 
@@ -108,31 +140,6 @@ DECLARE_DF_FUNCTION_IN_DUST(
 	0x00429CB0, DF_Set_Display);
 
 /* Change BitBlt */
-typedef BOOL(WINAPI* BitBlt_t)(HDC, int, int, int, int, HDC, int, int, DWORD);
-BitBlt_t originalBitBlt = NULL;
-
-typedef BOOL(WINAPI* StretchBlt_t)(HDC, int, int, int, int, HDC, int, int, int, int, DWORD);
-StretchBlt_t customStretchBlt = NULL;
-
-void InitializeOriginalBitBlt() {
-	originalBitBlt = (BitBlt_t)GetProcAddress(GetModuleHandle("GDI32.dll"), "BitBlt");
-	if (originalBitBlt == NULL) {
-		printf("Failed to get original BitBlt address\n");
-	}
-	else {
-		printf("Original BitBlt address: %p\n", originalBitBlt);
-	}
-}
-void InitializecustomStretchBlt() {
-	customStretchBlt = (StretchBlt_t)GetProcAddress(GetModuleHandle("GDI32.dll"), "StretchBlt");
-	if (customStretchBlt == NULL) {
-		printf("Failed to get original BitBlt address\n");
-	}
-	else {
-		printf("Original BitBlt address: %p\n", customStretchBlt);
-	}
-}
-
 RECT GetScreenDimensions() {
 	RECT desktop;
 	const HWND hDesktop = GetDesktopWindow();
@@ -178,18 +185,12 @@ POS CalculateScalingAndOffset(RECT window, int x, int y, int cx, int cy) {
 	return tempPos;
 }
 
+typedef BOOL(WINAPI* StretchBlt_t)(HDC, int, int, int, int, HDC, int, int, int, int, DWORD);
+StretchBlt_t customStretchBlt = NULL;
+
 BOOL WINAPI DF_BitBltPlaceholder(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop) {
 	RECT desktop = GetScreenDimensions();
 	POS tempPos = CalculateScalingAndOffset(desktop, x, y, cx, cy);
-
-	/*printf("Screen Bounds: x=%d, y=%d, w=%d, h=%d\n",
-		DUST_SCREEN_OFFSET.x,
-		DUST_SCREEN_OFFSET.y,
-		DUST_SCREEN_OFFSET.width,
-		DUST_SCREEN_OFFSET.height);
-
-	printf("CustomBitBlt called: hdc=%p, x=%d, y=%d, cx=%d, cy=%d, hdcSrc=%p, x1=%d, y1=%d, rop=%lu\n",
-		hdc, tempPos.x, tempPos.y, tempPos.width, tempPos.height, hdcSrc, x1, y1, rop);*/
 
 	BOOL result = customStretchBlt(
 		hdc,
@@ -203,53 +204,27 @@ BOOL WINAPI DF_BitBltPlaceholder(HDC hdc, int x, int y, int cx, int cy, HDC hdcS
 }
 
 void PatchBitBlt() {
-	DWORD oldProtect;
-	// Change memory protection to allow writing
-	if (VirtualProtect((LPVOID)0x0046233c, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect)) {
-		// Patch the IAT entry
-		*(BitBlt_t*)0x0046233c = DF_BitBltPlaceholder;
-
-		// Restore the old protection
-		if (!VirtualProtect((LPVOID)0x0046233c, sizeof(LPVOID), oldProtect, &oldProtect)) {
-			printf("Failed to restore memory protection at 0x0046233c\n");
-		}
-		else {
-			printf("Patched IAT entry at 0x0046233c to point to CustomBitBlt\n");
-		}
-	}
-	else {
-		printf("Failed to change memory protection at 0x0046233c\n");
-	}
+	PatchFunction("GDI32.dll", "StretchBlt", customStretchBlt, DF_BitBltPlaceholder, (void*)0x0046233c);
 }
 
 BEGIN_CALL_PATCHES(DF_BitBltPlaceholder)
-PATCH_CALL_IN_DUST(0x0042872d)
-PATCH_CALL_IN_DUST(0x0042877f)
-PATCH_CALL_IN_DUST(0x0042881b)
-PATCH_CALL_IN_DUST(0x0042899a)
-PATCH_CALL_IN_DUST(0x004289d2)
-PATCH_CALL_IN_DUST(0x00428a6b)
-PATCH_CALL_IN_DUST(0x00428aa3)
-PATCH_CALL_IN_DUST(0x00428baa)
-PATCH_CALL_IN_DUST(0x004290ce)
-PATCH_CALL_IN_DUST(0x00429172)
-PATCH_CALL_IN_DUST(0x0042e132)
+	PATCH_CALL_IN_DUST(0x0042872d)
+	PATCH_CALL_IN_DUST(0x0042877f)
+	PATCH_CALL_IN_DUST(0x0042881b)
+	PATCH_CALL_IN_DUST(0x0042899a)
+	PATCH_CALL_IN_DUST(0x004289d2)
+	PATCH_CALL_IN_DUST(0x00428a6b)
+	PATCH_CALL_IN_DUST(0x00428aa3)
+	PATCH_CALL_IN_DUST(0x00428baa)
+	PATCH_CALL_IN_DUST(0x004290ce)
+	PATCH_CALL_IN_DUST(0x00429172)
+	PATCH_CALL_IN_DUST(0x0042e132)
 END_CALL_PATCHES
 
 /* Change ScreenToClient */
 
 typedef BOOL(WINAPI* ScreenToClient_t)(HWND, LPPOINT);
 ScreenToClient_t originalScreenToClient = NULL;
-
-void InitializeScreenToClient() {
-	originalScreenToClient = (ScreenToClient_t)GetProcAddress(GetModuleHandle("USER32.dll"), "ScreenToClient");
-	if (originalScreenToClient == NULL) {
-		printf("Failed to get original ScreenToClient address\n");
-	}
-	else {
-		printf("Original ScreenToClient address: %p\n", originalScreenToClient);
-	}
-}
 
 BOOL WINAPI DF_ScreenToClientPlaceholder(HWND hWind, LPPOINT lpPoint) {
 	BOOL result = originalScreenToClient(hWind, lpPoint);
@@ -268,28 +243,12 @@ BOOL WINAPI DF_ScreenToClientPlaceholder(HWND hWind, LPPOINT lpPoint) {
 }
 
 void PatchScreenToClient() {
-	DWORD oldProtect;
-	// Change memory protection to allow writing
-	if (VirtualProtect((LPVOID)0x00462490, sizeof(LPVOID), PAGE_EXECUTE_READWRITE, &oldProtect)) {
-		// Patch the IAT entry
-		*(ScreenToClient_t*)0x00462490 = DF_ScreenToClientPlaceholder;
-
-		// Restore the old protection
-		if (!VirtualProtect((LPVOID)0x00462490, sizeof(LPVOID), oldProtect, &oldProtect)) {
-			printf("Failed to restore memory protection at 0x00462490\n");
-		}
-		else {
-			printf("Patched IAT entry at 0x00462490 to point to ScreenToClient\n");
-		}
-	}
-	else {
-		printf("Failed to change memory protection at 0x00462490\n");
-	}
+	PatchFunction("USER32.dll", "ScreenToClient", originalScreenToClient, DF_ScreenToClientPlaceholder, (void*)0x00462490);
 }
 
 BEGIN_CALL_PATCHES(DF_ScreenToClientPlaceholder)
-PATCH_CALL_IN_DUST(0x0042d5d3)
-PATCH_CALL_IN_DUST(0x0042e2b7)
+	PATCH_CALL_IN_DUST(0x0042d5d3)
+	PATCH_CALL_IN_DUST(0x0042e2b7)
 END_CALL_PATCHES
 
 // Override this function to prevent the game
@@ -492,10 +451,7 @@ BOOL WINAPI DllMain(
 
 			CalculateScreenBounds();
 
-			InitializecustomStretchBlt();
 			PatchBitBlt();
-
-			InitializeScreenToClient();
 			PatchScreenToClient();
 
 			PatchSysColorCalls();
