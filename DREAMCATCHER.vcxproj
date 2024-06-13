@@ -159,6 +159,7 @@
     <ClCompile Include="src/strings.cpp" />
     <ClCompile Include="src/window.cpp" />
     <ClCompile Include="src\memory.cpp" />
+    <ClCompile Include="src\scaling.cpp" />
     <ClCompile Include="src\system.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -172,6 +173,7 @@
     <ClInclude Include="inc\memory.hpp" />
     <ClInclude Include="inc\system.hpp" />
     <ClInclude Include="inc\types.hpp" />
+    <ClInclude Include="inc\scaling.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="cpp.hint" />

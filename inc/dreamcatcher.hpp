@@ -10,6 +10,7 @@
 #include <math.h>
 
 #include "types.hpp"
+#include "scaling.hpp"
 
 #if TITANIC
 #elif LUNICUS

@@ -6,19 +6,6 @@ void __cdecl STUB(void)
 {
 }
 
-struct POS {
-	int x;
-	int y;
-	int width;
-	int height;
-};
-
-int DUST_CLIENT_WIDTH = 512;
-int DUST_CLIENT_HEIGHT = 384;
-float DUST_CLIENT_SCALING = 1.0f;
-POINT DUST_CLIENT_OFFSET = { 0,0 };
-POINT DUST_SCREEN_OFFSET = { 0,0 };
-
 void** DF_INTERNAL_ChangeDisplayMode_Addr =
 #if TITANIC
 (void**)NULL;
@@ -121,6 +108,8 @@ END_CALL_PATCHES
 DECLARE_DF_FUNCTION_IN_DUST(
 	0x00428130, DivertedDFWinMain);
 
+
+
 // Override this function to prevent the game from changing 
 // the screen resolution.
 
@@ -140,71 +129,32 @@ DECLARE_DF_FUNCTION_IN_DUST(
 	0x00429CB0, DF_Set_Display);
 
 /* Change BitBlt */
-RECT GetScreenDimensions() {
-	RECT desktop;
-	const HWND hDesktop = GetDesktopWindow();
-	GetWindowRect(hDesktop, &desktop);
-	return desktop;
-}
-
-void CalculateScreenBounds() {
-	RECT window = GetScreenDimensions();
-
-	// Set client bounds (original image size and offset)
-	DUST_CLIENT_OFFSET.x = (window.right / 2) - (DUST_CLIENT_WIDTH / 2);
-	DUST_CLIENT_OFFSET.y = (window.bottom / 2) - (DUST_CLIENT_HEIGHT / 2);
-
-	// Determine the appropriate scaling
-	float hscale = (float)window.right / DUST_CLIENT_WIDTH;
-	float vscale = (float)window.bottom / DUST_CLIENT_HEIGHT;
-	DUST_CLIENT_SCALING = min(hscale, vscale);
-
-	// Set screen bounds (scaled image size and offset)
-	DUST_SCREEN_OFFSET.x = ((window.right / 2) - (DUST_CLIENT_WIDTH * DUST_CLIENT_SCALING / 2));
-	DUST_SCREEN_OFFSET.y = ((window.bottom / 2) - (DUST_CLIENT_HEIGHT * DUST_CLIENT_SCALING / 2));
-}
-
-// Function to calculate the scaling factor and offset
-POS CalculateScalingAndOffset(RECT window, int x, int y, int cx, int cy) {
-	POS tempPos = { 0,0,0,0 };
-
-	// Adjust positioning from centered to top-left corner
-	x = x - ((window.right / 2) - (DUST_CLIENT_WIDTH / 2));
-	y = y - ((window.bottom / 2) - (DUST_CLIENT_HEIGHT / 2));
-
-	// Calculate new offset based on scaling factor
-	int offsetX = ((window.right - (DUST_CLIENT_WIDTH * DUST_CLIENT_SCALING)) / 2);
-	int offsetY = ((window.bottom - (DUST_CLIENT_HEIGHT * DUST_CLIENT_SCALING)) / 2);
-
-	// Create new StretchBlt POSitioning values
-	tempPos.x = (int)(x * DUST_CLIENT_SCALING) + DUST_SCREEN_OFFSET.x;
-	tempPos.y = (int)(y * DUST_CLIENT_SCALING) + DUST_SCREEN_OFFSET.y;
-	tempPos.width = cx * DUST_CLIENT_SCALING;
-	tempPos.height = cy * DUST_CLIENT_SCALING;
-
-	return tempPos;
-}
-
 typedef BOOL(WINAPI* StretchBlt_t)(HDC, int, int, int, int, HDC, int, int, int, int, DWORD);
 StretchBlt_t customStretchBlt = NULL;
 
 BOOL WINAPI DF_BitBltPlaceholder(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop) {
-	RECT desktop = GetScreenDimensions();
-	POS tempPos = CalculateScalingAndOffset(desktop, x, y, cx, cy);
-
+	RECT tempRect = { x,y,x + cx, y + cy };
+	DFSCALE::RectToScaledSpace(&tempRect);
+	
 	BOOL result = customStretchBlt(
 		hdc,
-		tempPos.x,
-		tempPos.y,
-		tempPos.width,
-		tempPos.height,
+		tempRect.left,
+		tempRect.top,
+		tempRect.right - tempRect.left,
+		tempRect.bottom - tempRect.top,
 		hdcSrc, x1, y1, cx, cy, rop);
 
 	return result;
 }
 
 void PatchBitBlt() {
-	PatchFunction("GDI32.dll", "StretchBlt", customStretchBlt, DF_BitBltPlaceholder, (void*)0x0046233c);
+	PatchFunction(
+		"GDI32.dll", 
+		"StretchBlt", 
+		customStretchBlt, 
+		DF_BitBltPlaceholder, 
+		(void*)0x0046233c
+	);
 }
 
 BEGIN_CALL_PATCHES(DF_BitBltPlaceholder)
@@ -221,6 +171,76 @@ BEGIN_CALL_PATCHES(DF_BitBltPlaceholder)
 	PATCH_CALL_IN_DUST(0x0042e132)
 END_CALL_PATCHES
 
+/* Replace Rectangle */
+typedef BOOL(WINAPI* Rectangle_t)(HDC, int, int, int, int);
+Rectangle_t customRectangle = NULL;
+
+BOOL WINAPI DF_RectanglePlaceholder(HDC hdc, int left, int top, int right, int bottom) {
+	RECT tempRect = { left,top,right, bottom };
+	DFSCALE::RectToScaledSpace(&tempRect);
+
+	BOOL result = customRectangle(
+		hdc,
+		tempRect.left,
+		tempRect.top,
+		tempRect.right,
+		tempRect.bottom
+	);
+
+	return result;
+}
+
+void PatchRectangle() {
+	PatchFunction(
+		"GDI32.dll",
+		"Rectangle",
+		customRectangle,
+		DF_RectanglePlaceholder,
+		(void*)0x0046238c
+	);
+}
+
+BEGIN_CALL_PATCHES(DF_RectanglePlaceholder)
+PATCH_CALL_IN_DUST(0x0042dd39)
+PATCH_CALL_IN_DUST(0x0042e3f5)
+PATCH_CALL_IN_DUST(0x0042e570)
+END_CALL_PATCHES
+
+
+/* Replace TextOutA */
+typedef BOOL(WINAPI* TextOutA_t)(HDC, int, int, LPCSTR, int);
+TextOutA_t customTextOutA = NULL;
+
+BOOL WINAPI DF_TextOutAPlaceholder(HDC hdc, int x, int y, LPCSTR lpString, int c) {
+	POINT tempPoint = { x,y };
+	DFSCALE::PointToScaledSpace(&tempPoint);
+
+	BOOL result = customTextOutA(
+		hdc,
+		tempPoint.x,
+		tempPoint.y,
+		lpString,
+		c
+	);
+
+	return result;
+}
+
+void PatchTextOutA() {
+	PatchFunction(
+		"GDI32.dll",
+		"TextOutA",
+		customTextOutA,
+		DF_TextOutAPlaceholder,
+		(void*)0x00462394
+	);
+}
+
+BEGIN_CALL_PATCHES(DF_TextOutAPlaceholder)
+PATCH_CALL_IN_DUST(0x0042e716)
+END_CALL_PATCHES
+
+
 /* Change ScreenToClient */
 
 typedef BOOL(WINAPI* ScreenToClient_t)(HWND, LPPOINT);
@@ -228,28 +248,27 @@ ScreenToClient_t originalScreenToClient = NULL;
 
 BOOL WINAPI DF_ScreenToClientPlaceholder(HWND hWind, LPPOINT lpPoint) {
 	BOOL result = originalScreenToClient(hWind, lpPoint);
-
-	POS tempPos = { 0,0,0,0 };
-
-	tempPos.x = ((lpPoint->x - DUST_SCREEN_OFFSET.x) / DUST_CLIENT_SCALING) + DUST_CLIENT_OFFSET.x;
-	tempPos.y = (lpPoint->y - DUST_SCREEN_OFFSET.y) / DUST_CLIENT_SCALING + DUST_CLIENT_OFFSET.y;
-
-	//printf("(%d,%d) -> (%d,%d)\n", lpPoint->x, lpPoint->y,tempPos.x,tempPos.y);
-
-	lpPoint->x = tempPos.x;
-	lpPoint->y = tempPos.y;
+	DFSCALE::PointToOriginalSpace(lpPoint);
 
 	return result;
 }
 
 void PatchScreenToClient() {
-	PatchFunction("USER32.dll", "ScreenToClient", originalScreenToClient, DF_ScreenToClientPlaceholder, (void*)0x00462490);
+	PatchFunction(
+		"USER32.dll", 
+		"ScreenToClient", 
+		originalScreenToClient, 
+		DF_ScreenToClientPlaceholder, 
+		(void*)0x00462490
+	);
 }
 
 BEGIN_CALL_PATCHES(DF_ScreenToClientPlaceholder)
 	PATCH_CALL_IN_DUST(0x0042d5d3)
 	PATCH_CALL_IN_DUST(0x0042e2b7)
 END_CALL_PATCHES
+
+
 
 // Override this function to prevent the game
 // from asking about changing the display resolution.
@@ -449,9 +468,11 @@ BOOL WINAPI DllMain(
 			AllocConsole();
 			freopen_s(&Global.console, "CONOUT$", "w", stdout);
 
-			CalculateScreenBounds();
+			DFSCALE::Initialize();
 
 			PatchBitBlt();
+			PatchRectangle();
+			PatchTextOutA();
 			PatchScreenToClient();
 
 			PatchSysColorCalls();

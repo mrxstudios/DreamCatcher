@@ -20,3 +20,9 @@ typedef struct wpoint_t
 } WPOINT;
 
 #endif
+
+
+
+static class DFSCALE {
+
+};
